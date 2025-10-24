@@ -30,6 +30,7 @@ Dépendances : requests, python-dateutil, python-dotenv (optionnel)
 import os
 import json
 import logging
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import date, timedelta
 
@@ -118,20 +119,38 @@ class Amadeus:
         return {"Authorization": f"Bearer {self._token}"}
 
     def search_offers(self, origin: str, dest: str, depart: date, ret: Optional[date]=None, adults: int=2) -> List[Dict[str, Any]]:
-        url = f"{self.host}/v2/shopping/flight-offers"
-        params = {
-            "originLocationCode": origin,
-            "destinationLocationCode": dest,
-            "departureDate": depart.isoformat(),
-            "adults": str(adults),
-            "currencyCode": CURRENCY,
-            "max": "50",
-        }
-        if ret:
-            params["returnDate"] = ret.isoformat()
-        r = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        r.raise_for_status()
-        return r.json().get("data", [])
+    	url = f"{self.host}/v2/shopping/flight-offers"
+    	params = {
+	        "originLocationCode": origin,
+	        "destinationLocationCode": dest,
+	        "departureDate": depart.isoformat(),
+        	"adults": str(adults),
+        	"currencyCode": CURRENCY,
+        	"max": "20",  # 50 -> 20 pour limiter la charge
+    	}
+    	if ret:
+	        params["returnDate"] = ret.isoformat()
+	    r = self._safe_get(url, params)
+	    return r.json().get("data", [])
+
+	
+	def _safe_get(self, url, params, max_retries=6):
+    attempt = 0
+    while True:
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        if resp.status_code == 429:
+            attempt += 1
+            if attempt > max_retries:
+                resp.raise_for_status()
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                wait_s = min(60, int(retry_after)) if retry_after else min(60, 2 ** attempt)
+            except Exception:
+                wait_s = min(60, 2 ** attempt)
+            time.sleep(wait_s)
+            continue
+        resp.raise_for_status()
+        return resp
 
 
 # --- Vérifications d'une offre ---
@@ -311,6 +330,8 @@ def notify_discord(payload: Dict[str, Any]):
 
 
 if __name__ == "__main__":
+	if not os.getenv("AMADEUS_CLIENT_ID") or not os.getenv("AMADEUS_CLIENT_SECRET"):
+    	raise SystemExit("FATAL: AMADEUS_CLIENT_ID/SECRET manquants. Ajoute-les dans tes secrets GitHub Actions.")
     out = run_once()
     print(json.dumps(out, indent=2, ensure_ascii=False))
     notify_discord(out)
